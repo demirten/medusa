@@ -687,8 +687,14 @@ static int tcpsocket_wtimer_onevent (struct medusa_timer *timer, unsigned int ev
 bail:   return -1;
 }
 
-static int tcpsocket_wbuffer_commit (struct medusa_tcpsocket *tcpsocket)
+static int tcpsocket_buffer_commit_internal (struct medusa_tcpsocket *tcpsocket, int restart_wtimer)
 {
+        int rc;
+        int64_t wblength;
+        int64_t rblength;
+        unsigned int current_events;
+        unsigned int desired_events;
+
         if (MEDUSA_IS_ERR_OR_NULL(tcpsocket)) {
                 return -EINVAL;
         }
@@ -698,104 +704,75 @@ static int tcpsocket_wbuffer_commit (struct medusa_tcpsocket *tcpsocket)
         if (tcpsocket_get_buffered(tcpsocket) <= 0) {
                 return -EINVAL;
         }
-        if ((tcpsocket->state == MEDUSA_TCPSOCKET_STATE_CONNECTED) &&
-            (!MEDUSA_IS_ERR_OR_NULL(tcpsocket->io))) {
-                int rc;
-                int64_t wblength;
-                int64_t rblength;
-                wblength = medusa_buffer_get_length(tcpsocket->wbuffer);
-                if (wblength < 0) {
-                        return wblength;
-                } else if (wblength == 0) {
-                        rc = medusa_io_del_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_OUT);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                } else {
-                        rc = medusa_io_add_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_OUT);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                }
-                rblength = medusa_buffer_get_length(tcpsocket->rbuffer);
-                if (rblength < 0) {
-                        return rblength;
-                } else if (tcpsocket->rbuffer_limit == 0 || rblength < tcpsocket->rbuffer_limit) {
-                        rc = medusa_io_add_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_IN);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                } else {
-                        rc = medusa_io_del_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_IN);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                }
-                if (!MEDUSA_IS_ERR_OR_NULL(tcpsocket->wtimer)) {
-                        double interval;
-                        interval = medusa_timer_get_interval_unlocked(tcpsocket->wtimer);
-                        if (interval < 0) {
-                                return -EIO;
-                        }
-                        rc = medusa_timer_set_interval_unlocked(tcpsocket->wtimer, interval);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                        rc = medusa_timer_restart_unlocked(tcpsocket->wtimer);
-                        if (rc < 0) {
-                                return rc;
-                        }
+        if (tcpsocket->state != MEDUSA_TCPSOCKET_STATE_CONNECTED ||
+            MEDUSA_IS_ERR_OR_NULL(tcpsocket->io)) {
+                return 0;
+        }
+
+        /* Get buffer lengths once */
+        wblength = medusa_buffer_get_length(tcpsocket->wbuffer);
+        if (wblength < 0) {
+                return wblength;
+        }
+        rblength = medusa_buffer_get_length(tcpsocket->rbuffer);
+        if (rblength < 0) {
+                return rblength;
+        }
+
+        /* Determine desired I/O events based on buffer state */
+        current_events = medusa_io_get_events_unlocked(tcpsocket->io);
+        desired_events = current_events;
+
+        /* Adjust OUT event based on write buffer */
+        if (wblength > 0) {
+                desired_events |= MEDUSA_IO_EVENT_OUT;
+        } else {
+                desired_events &= ~MEDUSA_IO_EVENT_OUT;
+        }
+
+        /* Adjust IN event based on read buffer limit */
+        if (tcpsocket->rbuffer_limit == 0 || rblength < tcpsocket->rbuffer_limit) {
+                desired_events |= MEDUSA_IO_EVENT_IN;
+        } else {
+                desired_events &= ~MEDUSA_IO_EVENT_IN;
+        }
+
+        /* Only update if events changed */
+        if (desired_events != current_events) {
+                rc = medusa_io_set_events_unlocked(tcpsocket->io, desired_events);
+                if (rc < 0) {
+                        return rc;
                 }
         }
+
+        /* Restart write timer if requested */
+        if (restart_wtimer && !MEDUSA_IS_ERR_OR_NULL(tcpsocket->wtimer)) {
+                double interval;
+                interval = medusa_timer_get_interval_unlocked(tcpsocket->wtimer);
+                if (interval < 0) {
+                        return -EIO;
+                }
+                rc = medusa_timer_set_interval_unlocked(tcpsocket->wtimer, interval);
+                if (rc < 0) {
+                        return rc;
+                }
+                rc = medusa_timer_restart_unlocked(tcpsocket->wtimer);
+                if (rc < 0) {
+                        return rc;
+                }
+        }
+
         return 0;
+}
+
+static int tcpsocket_wbuffer_commit (struct medusa_tcpsocket *tcpsocket)
+{
+        return tcpsocket_buffer_commit_internal(tcpsocket, 1);
 }
 
 static int tcpsocket_rbuffer_commit (struct medusa_tcpsocket *tcpsocket)
 {
-        if (MEDUSA_IS_ERR_OR_NULL(tcpsocket)) {
-                return -EINVAL;
-        }
-        if (MEDUSA_IS_ERR_OR_NULL(tcpsocket->wbuffer)) {
-                return -EINVAL;
-        }
-        if (tcpsocket_get_buffered(tcpsocket) <= 0) {
-                return -EINVAL;
-        }
-        if ((tcpsocket->state == MEDUSA_TCPSOCKET_STATE_CONNECTED) &&
-            (!MEDUSA_IS_ERR_OR_NULL(tcpsocket->io))) {
-                int rc;
-                int64_t wblength;
-                int64_t rblength;
-                wblength = medusa_buffer_get_length(tcpsocket->wbuffer);
-                if (wblength < 0) {
-                        return wblength;
-                } else if (wblength == 0) {
-                        rc = medusa_io_del_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_OUT);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                } else {
-                        rc = medusa_io_add_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_OUT);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                }
-                rblength = medusa_buffer_get_length(tcpsocket->rbuffer);
-                if (rblength < 0) {
-                        return rblength;
-                } else if (tcpsocket->rbuffer_limit == 0 || rblength < tcpsocket->rbuffer_limit) {
-                        rc = medusa_io_add_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_IN);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                } else {
-                        rc = medusa_io_del_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_IN);
-                        if (rc < 0) {
-                                return rc;
-                        }
-                }
-        }
-        return 0;
+        return tcpsocket_buffer_commit_internal(tcpsocket, 0);
 }
 
 static int tcpsocket_wbuffer_onevent (struct medusa_buffer *buffer, unsigned int events, void *context, void *param)
@@ -1048,27 +1025,27 @@ static int tcpsocket_io_onevent (struct medusa_io *io, unsigned int events, void
                                                         medusa_errorf("medusa_buffer_choke failed, clength: %d, wlength: %d, blength: %d", (int) clength, (int) wlength, (int) medusa_buffer_get_length(tcpsocket->wbuffer));
                                                         goto bail;
                                                 }
+                                                blength = medusa_buffer_get_length(tcpsocket->wbuffer);
+                                                if (blength < 0) {
+                                                        medusa_errorf("medusa_buffer_get_length failed, blength: %d", (int) blength);
+                                                        goto bail;
+                                                }
                                                 medusa_tcpsocket_event_buffered_write.length    = wlength;
-                                                medusa_tcpsocket_event_buffered_write.remaining = medusa_buffer_get_length(tcpsocket->wbuffer);
+                                                medusa_tcpsocket_event_buffered_write.remaining = blength;
                                                 rc = medusa_tcpsocket_onevent_unlocked(tcpsocket, MEDUSA_TCPSOCKET_EVENT_BUFFERED_WRITE, &medusa_tcpsocket_event_buffered_write);
                                                 if (rc < 0) {
                                                         medusa_errorf("medusa_tcpsocket_onevent_unlocked failed, rc: %d", rc);
                                                         goto bail;
                                                 }
+                                                if (blength == 0) {
+                                                        rc = medusa_tcpsocket_onevent_unlocked(tcpsocket, MEDUSA_TCPSOCKET_EVENT_BUFFERED_WRITE_FINISHED, NULL);
+                                                        if (rc < 0) {
+                                                                medusa_errorf("medusa_tcpsocket_onevent_unlocked failed, rc: %d", rc);
+                                                                goto bail;
+                                                        }
+                                                }
                                         }
                                         break;
-                                }
-                                blength = medusa_buffer_get_length(tcpsocket->wbuffer);
-                                if (blength < 0) {
-                                        medusa_errorf("medusa_buffer_get_length failed, blength: %d", (int) blength);
-                                        goto bail;
-                                }
-                                if (blength == 0) {
-                                        rc = medusa_tcpsocket_onevent_unlocked(tcpsocket, MEDUSA_TCPSOCKET_EVENT_BUFFERED_WRITE_FINISHED, NULL);
-                                        if (rc < 0) {
-                                                medusa_errorf("medusa_tcpsocket_onevent_unlocked failed, rc: %d", rc);
-                                                goto bail;
-                                        }
                                 }
                         }
                 } else if (tcpsocket->state == MEDUSA_TCPSOCKET_STATE_ERROR) {
@@ -1225,15 +1202,19 @@ static int tcpsocket_io_onevent (struct medusa_io *io, unsigned int events, void
                                                 if (tcpsocket->ssl_wantread ||
                                                     tcpsocket->ssl_wantwrite) {
                                                         int64_t blength;
+                                                        unsigned int current_events;
                                                         blength = medusa_buffer_get_length(tcpsocket->wbuffer);
                                                         if (blength < 0) {
                                                                 medusa_errorf("medusa_buffer_get_length failed, blength: %d", (int) blength);
                                                                 return blength;
                                                         } else if (blength > 0) {
-                                                                rc = medusa_io_add_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_OUT);
-                                                                if (rc < 0) {
-                                                                        medusa_errorf("medusa_io_add_events_unlocked failed, rc: %d", rc);
-                                                                        return rc;
+                                                                current_events = medusa_io_get_events_unlocked(tcpsocket->io);
+                                                                if (!(current_events & MEDUSA_IO_EVENT_OUT)) {
+                                                                        rc = medusa_io_add_events_unlocked(tcpsocket->io, MEDUSA_IO_EVENT_OUT);
+                                                                        if (rc < 0) {
+                                                                                medusa_errorf("medusa_io_add_events_unlocked failed, rc: %d", rc);
+                                                                                return rc;
+                                                                        }
                                                                 }
                                                         }
                                                         tcpsocket->ssl_wantread  = 0;
